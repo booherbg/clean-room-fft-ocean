@@ -40,6 +40,14 @@ export function readTargetBlock(
  * fence. Uses only the public `WebGLRenderer.getContext()` /
  * `setRenderTarget()` — no three.js internals.
  */
+/**
+ * How long `consume` will wait on a fence that the GPU has not reached yet.
+ * One frame of latency means it practically always has; this is the ceiling
+ * for the rare case where it has not, and is short enough that a stall shows
+ * up as a dropped frame rather than a hang.
+ */
+const WAIT_TIMEOUT_NS = 1_000_000; // 1 ms
+
 export class AsyncBlockReader {
   private readonly gl: WebGL2RenderingContext;
   private readonly slots = new Map<number, ReaderSlot>();
@@ -88,11 +96,18 @@ export class AsyncBlockReader {
     const s = this.slots.get(slot);
     if (!s || !s.sync) return null;
     const gl = this.gl;
-    gl.deleteSync(s.sync);
-    s.sync = null;
+    // Wait on the fence *before* touching the buffer, and delete it only
+    // after the read. Reading first and deleting the sync up front makes the
+    // driver discard the shadow copy it prepared at fence time: ANGLE then
+    // logs "READ-usage buffer was written, then fenced, but written again
+    // before being read back" once per frame and services the read as a
+    // pipeline stall — the exact cost this class exists to avoid.
+    gl.clientWaitSync(s.sync, gl.SYNC_FLUSH_COMMANDS_BIT, 0);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbo);
     gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, s.data);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.deleteSync(s.sync);
+    s.sync = null;
     return s.data;
   }
 
