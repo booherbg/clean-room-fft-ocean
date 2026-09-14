@@ -40,14 +40,6 @@ export function readTargetBlock(
  * fence. Uses only the public `WebGLRenderer.getContext()` /
  * `setRenderTarget()` — no three.js internals.
  */
-/**
- * How long `consume` will wait on a fence that the GPU has not reached yet.
- * One frame of latency means it practically always has; this is the ceiling
- * for the rare case where it has not, and is short enough that a stall shows
- * up as a dropped frame rather than a hang.
- */
-const WAIT_TIMEOUT_NS = 1_000_000; // 1 ms
-
 export class AsyncBlockReader {
   private readonly gl: WebGL2RenderingContext;
   private readonly slots = new Map<number, ReaderSlot>();
@@ -74,8 +66,14 @@ export class AsyncBlockReader {
     this.renderer.setRenderTarget(target);
     if (target.textures.length > 1) gl.readBuffer(gl.COLOR_ATTACHMENT0 + attachment);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbo);
+    // Fresh storage every time (orphaning), not only on a size change. On
+    // Chrome a fence behind a READ-usage buffer allocates a shadow copy of
+    // it that `getBufferSubData` never consumes, so re-fencing the same
+    // storage logs "READ-usage buffer was written, then fenced, but written
+    // again" every frame — 256 of those and the console stops reporting
+    // WebGL errors at all. Re-specifying the buffer releases the shadow.
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
     if (s.w !== w || s.h !== h) {
-      gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
       s.data = new Float32Array(w * h * 4);
       s.w = w;
       s.h = h;
@@ -89,18 +87,18 @@ export class AsyncBlockReader {
 
   /**
    * The result of the last `issue` on `slot`: `w*h*4` floats (rows bottom-up),
-   * or null when nothing was issued. Waits only if the GPU has not yet
-   * reached the fence — one frame later it practically always has.
+   * or null when nothing was issued. One frame later the GPU has practically
+   * always passed the fence; `getBufferSubData` waits for it if not.
    */
   consume(slot: number): Float32Array | null {
     const s = this.slots.get(slot);
     if (!s || !s.sync) return null;
     const gl = this.gl;
-    // Wait on the fence *before* touching the buffer, and delete it only
-    // after the read. Reading first and deleting the sync up front makes the
-    // driver discard the shadow copy it prepared at fence time: ANGLE then
-    // logs "READ-usage buffer was written, then fenced, but written again
-    // before being read back" once per frame and services the read as a
+    // Check the fence *before* touching the buffer and delete it only after
+    // the read (WebGL allows no wait longer than 0 ms here, so this is a
+    // flush-and-poll; the read itself does any waiting). Reading first and
+    // deleting the sync up front made ANGLE's Metal backend discard the
+    // shadow copy it prepared at fence time and service the read as a
     // pipeline stall — the exact cost this class exists to avoid.
     gl.clientWaitSync(s.sync, gl.SYNC_FLUSH_COMMANDS_BIT, 0);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbo);

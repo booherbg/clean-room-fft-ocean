@@ -35,6 +35,7 @@ export class LoadingOverlay {
 
   /** Advance to the next message and yield a frame so it paints. */
   async next(): Promise<void> {
+    if (this.el.dataset.state === "lost") return;
     this.stage = Math.min(this.stage + 1, LOADING_MESSAGES.length - 1);
     const text = LOADING_MESSAGES[this.stage] as string;
     this.message.textContent = text;
@@ -57,12 +58,35 @@ export class LoadingOverlay {
     this.bar.style.width = "0";
   }
 
+  /**
+   * The GPU went away after boot: bring the overlay back with the loss
+   * report (`data-state="lost"`). Boot's own `next`/`finish` leave it alone
+   * from here on.
+   */
+  lost(message: string): void {
+    this.el.hidden = false;
+    this.el.classList.remove("is-done");
+    this.fail(message);
+    this.el.dataset.state = "lost";
+  }
+
+  /** The context came back and the scene is rebuilt: hide again. */
+  recovered(): void {
+    if (this.el.dataset.state !== "lost") return;
+    delete this.el.dataset.state;
+    this.el.classList.remove("is-failed");
+    this.el.classList.add("is-done");
+    this.el.hidden = true;
+  }
+
   /** Fade out and remove from the flow (kept in the DOM, hidden). */
   async finish(): Promise<void> {
-    while (this.stage < LOADING_MESSAGES.length - 1) await this.next();
+    while (this.stage < LOADING_MESSAGES.length - 1 && this.el.dataset.state !== "lost") await this.next();
     await sleep(250);
+    if (this.el.dataset.state === "lost") return;
     this.el.classList.add("is-done");
     await sleep(450);
+    if (this.el.dataset.state === "lost") return;
     this.el.hidden = true;
   }
 }

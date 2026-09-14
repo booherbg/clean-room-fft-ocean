@@ -80,15 +80,22 @@ export class Ocean extends THREE.Object3D {
   contextRestored(): void {
     this.sim.contextRestored?.();
     this.sky.invalidate();
-    this.buildSurface();
+    this.buildSurface(true);
   }
 
-  /** (Re)create the water mesh + material for the current tier and cascades. */
-  private buildSurface(): void {
+  /**
+   * (Re)create the water mesh + material for the current tier and cascades.
+   * With `afterLoss` the old ones are dropped rather than disposed: their GL
+   * objects died with the context, and three would only report each delete
+   * of a dead object as an error.
+   */
+  private buildSurface(afterLoss = false): void {
     if ((this.mesh as THREE.Mesh | undefined) !== undefined) {
       this.remove(this.mesh);
-      this.mesh.geometry.dispose();
-      this.material.dispose();
+      if (!afterLoss) {
+        this.mesh.geometry.dispose();
+        this.material.dispose();
+      }
     }
     const tier = tierConfig(this.params.quality);
     this.material = new WaterMaterial(this.sim.cascades.length);

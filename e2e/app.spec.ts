@@ -45,6 +45,31 @@ test.describe("demo app", () => {
     await expect(page.getByTestId("loading")).toHaveAttribute("data-state", "failed");
   });
 
+  test("no WebGL2 context at all: the gate quotes the browser and the previous visit's lost-context report", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        "fft-ocean.lastContextLoss",
+        JSON.stringify({ stage: "wake simulation", frame: 0, mode: "boat", gpu: "Test GPU", tier: "high", buffer: "800×600 @2", ua: "ua", at: "2026-09-14T12:00:00Z" }),
+      );
+      const proto = HTMLCanvasElement.prototype as unknown as { getContext: (...args: unknown[]) => unknown };
+      const orig = proto.getContext;
+      proto.getContext = function (this: HTMLCanvasElement, ...args: unknown[]) {
+        if (args[0] === "webgl2") {
+          this.dispatchEvent(new WebGLContextEvent("webglcontextcreationerror", { statusMessage: "Web page caused context loss and was blocked" }));
+          return null;
+        }
+        return orig.apply(this, args);
+      };
+    });
+    await page.goto("/");
+    await page.evaluate(() => window.__app.ready.catch(() => undefined));
+    await expect(page.getByTestId("loading")).toHaveAttribute("data-state", "failed");
+    const text = (await page.getByTestId("loading-message").textContent()) ?? "";
+    expect(text).toContain("could not create");
+    expect(text).toContain("Web page caused context loss and was blocked");
+    expect(text).toMatch(/previous visit .* lost the GPU while: wake simulation \(frame 0 of boat mode\) on Test GPU/);
+  });
+
   test("WebGL context loss: the app pauses, then rebuilds and renders again on restore", async ({ page }) => {
     await ready(page);
     for (let i = 0; i < 3; i++) await page.evaluate(() => window.__app.frame());
@@ -60,11 +85,20 @@ test.describe("demo app", () => {
     });
     await page.waitForFunction(() => window.__app.contextLost());
     await expect(page.getByTestId("hud-gpu")).toHaveText(/context lost/i);
+    // The overlay comes back with the loss report: stage, GPU, tier, buffer.
+    await expect(page.getByTestId("loading")).toBeVisible();
+    await expect(page.getByTestId("loading")).toHaveAttribute("data-state", "lost");
+    const report = await page.getByTestId("loading-message").textContent();
+    expect(report).toMatch(/GPU CONTEXT LOST\nwhile: .+ \(frame \d+ of orbit mode\)\n.+ · high · \d+×\d+ @\d/);
+    // …and is kept for a visit that cannot get a context at all.
+    const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("fft-ocean.lastContextLoss") ?? "null"));
+    expect(kept).toMatchObject({ mode: "orbit", tier: "high" });
     // Frames keep resolving while lost (nothing hangs).
     for (let i = 0; i < 3; i++) await page.evaluate(() => window.__app.frame());
     await page.evaluate(() => (window as unknown as { __loseExt: WEBGL_lose_context }).__loseExt.restoreContext());
     await page.waitForFunction(() => !window.__app.contextLost());
     await expect(page.getByTestId("rebuilding")).toBeHidden({ timeout: 30_000 });
+    await expect(page.getByTestId("loading")).toBeHidden();
     for (let i = 0; i < 6; i++) await page.evaluate(() => window.__app.frame());
     await expect(page.getByTestId("hud-gpu")).toHaveText(/WebGL2/);
     const centre = await page.evaluate(() => window.__app.pixel(0.5, 0.6));

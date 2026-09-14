@@ -96,9 +96,12 @@ body {
 .loading.is-failed .loading-message {
   color: #ffb3a7;
   letter-spacing: 0.08em;
-  max-width: 520px;
+  max-width: min(520px, 90vw);
   text-align: center;
   line-height: 1.5;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 .loading-bar {
   width: 260px;

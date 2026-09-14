@@ -59,13 +59,14 @@ src/render/   clipmap, waterMaterial + shaders/{water,common,include}, sky +
               vegetation + vegetationPlacement, ocean (composition of the above)
 src/app/      main (composition root + `window.__app` test API), gui, hud,
               cameras (Orbit/Fly/Boat), presets, buoyancy, wake, loading,
+              gpuWatch (which stage a WebGL context loss happened in),
               ship/{ship,shipModel,hullShape,hullPhysics,probesOverlay},
               spray/{sprayField (pure), spraySystem}, rain/rainSystem,
               assets/{shipLoader, proceduralTextures, shipMaterials}
 tests/        vitest (core + pure app logic)         19 files, 161 tests
 e2e/          playwright: gpu.spec (GPU vs CPU oracle), render.spec,
               app.spec, spray.spec, weather.spec, assets.spec;
-              pages/{gpu,render}                     6 specs, 51 tests
+              pages/{gpu,render}                     6 specs, 52 tests
 scripts/      perf.mjs (build+preview fps sweep), buildShipAsset.mjs
 ```
 
@@ -87,7 +88,7 @@ each and the key interfaces between the layers.
 frame, step(dt, frames), advance(seconds), simTime, stats (incl. `.gpu`),
 setGpuTimer, contextLost, camera, setCameraPosition, setCameraDirection,
 underwater, sunShafts, spray, rain, hull, ship, vegetation, wakeSample,
-snapshot, diff, pixel, column, preset`.
+snapshot, diff, pixel, column, preset, gpuWatch`.
 
 Two things to know about it:
 
@@ -115,7 +116,34 @@ SwiftShader. The README explains the launch options.
 
 URL flags: `?gpuTimer=1` turns on GPU section timing (it costs ~6 %, so it
 is off by default); `?ship=procedural` and `?palms=procedural` skip the
-glTF assets and use the procedural fallbacks.
+glTF assets and use the procedural fallbacks; `?diag=1` makes `gpuWatch`
+probe the GPU after every stage of every frame (normally only the first
+eight frames after a mode switch), so a context loss is charged to the
+stage that caused it rather than to the end of the frame.
+
+## When the GPU goes away
+
+A WebGL context loss (driver reset, the browser killing its GPU process,
+a phone's GPU giving up on a heavy frame) fires `webglcontextlost`
+*after* the frame that caused it. `app/gpuWatch.ts` keeps a breadcrumb of
+the stage the frame is in and, for a few frames after anything that
+changes the workload, calls `gl.finish()` plus a one-texel `readPixels`
+after each stage so a loss surfaces inside the stage that triggered it.
+The report (stage, frame, mode, GPU string, tier, buffer size, UA) is shown
+on the loading overlay, logged with `console.warn`, and stored in
+`localStorage["fft-ocean.lastContextLoss"]`; if the *next* visit cannot
+create a WebGL2 context, the unsupported-GPU gate quotes both the
+browser's `webglcontextcreationerror.statusMessage` and that stored
+report, so a phone that will not run the demo can still say why.
+
+On `webglcontextrestored`, `main.ts` runs `rebuild(tier, force=true)`:
+the sim, wake, readback PBOs, fences and timer queries are reset before
+any tick runs on the new context. Objects that were uploaded before the
+loss are dropped, not disposed — three's old `WebGLTextures` /
+`WebGLGeometries` instances keep their `dispose` listeners across a
+restore and would try to delete GL objects that no longer exist (one
+`INVALID_OPERATION: delete: object does not belong to this context` per
+object). The e2e suite covers the whole path with `WEBGL_lose_context`.
 
 ## Known flakes
 

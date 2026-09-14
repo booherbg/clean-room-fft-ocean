@@ -864,7 +864,11 @@ src/
                           storm / sunset (deep-partial patches on DEFAULT_PARAMS)
     buoyancy.ts           Buoyancy: async block readback → heightAt(x, z), covers()
     wake.ts               drives WakePass in boat mode; "Wake Probes" overlay
-    loading.ts            five-stage loading overlay (LOADING_MESSAGES)
+    loading.ts            five-stage loading overlay (LOADING_MESSAGES); also the
+                          "context lost" / "recovered" and no-WebGL2 states
+    gpuWatch.ts           GpuWatch: per-stage breadcrumb + finish/readPixels probes so a
+                          context loss is charged to the stage that caused it; report
+                          → overlay, console.warn, localStorage (quoted by the gate)
     ship/ship.ts          Ship group: HullPhysics + model (glTF or procedural) + probes
     ship/hullPhysics.ts   3×5 hull columns on a RigidBody; throttle, rudder, substeps
     ship/hullShape.ts     hull lines shared by the loft and the buoyancy columns
@@ -878,7 +882,7 @@ src/
     assets/proceduralTextures.ts  wood / canvas / rope / frond DataTextures
     styles.css
 tests/         vitest, 19 files / 161 tests: core + pure app logic (see §4)
-e2e/           playwright, 6 specs / 51 tests: gpu.spec, render.spec, app.spec,
+e2e/           playwright, 6 specs / 52 tests: gpu.spec, render.spec, app.spec,
                spray.spec, weather.spec, assets.spec; pages/{gpu,render}.{html,ts}
                test harnesses; __screenshots__/ (committed)
 scripts/       perf.mjs (headless fps sweep, GPU section table), buildShipAsset.mjs
@@ -964,14 +968,15 @@ interface AppApi { ready: Promise<void>; assetsReady: Promise<void>;
   frame(); step(dt, frames?); advance(seconds, dt?); simTime(); stats(): HudStats;
   setGpuTimer(on); contextLost(); camera(); setCameraPosition([x, y, z]);
   setCameraDirection([x, y, z]); underwater(); sunShafts(); spray(); hull(); ship();
-  vegetation(); wakeSample(dx, dz); snapshot(name); diff(a, b); pixel(u, v); preset() }
+  vegetation(); wakeSample(dx, dz); snapshot(name); diff(a, b); pixel(u, v); preset();
+  gpuWatch(): { stage, frame, mode, lostAt, gpu } }
 ```
 
 ## 4. Testing strategy
 
 Three suites, all green per commit (`npm run typecheck`, `npx vitest run`,
 `npx playwright test`): **vitest 19 files / 161 tests**, **playwright
-6 specs / 51 tests**.
+6 specs / 52 tests**.
 
 - **core + pure app logic (vitest, `tests/`):** `fft` (1-D/2-D vs naive
   DFT, round-trip), `butterfly` (table vs brute force, stage application),
@@ -1055,7 +1060,10 @@ without the extension).
 
 **URL flags:** `?gpuTimer=1` turns the GPU section timer on at boot;
 `?ship=procedural` keeps the procedural galleon instead of the glTF;
-`?palms=procedural` keeps the procedural palms.
+`?palms=procedural` keeps the procedural palms; `?diag=1` makes `GpuWatch`
+probe the GPU after every stage of every frame (default: the first eight
+frames after a mode switch), so a context loss names the stage that caused
+it — see `docs/architecture.md`, "When the GPU goes away".
 
 ## 6. Status and roadmap
 

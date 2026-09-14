@@ -18,6 +18,7 @@ import { RainSystem, type RainFrame } from "./rain/rainSystem";
 import { SpraySystem, type SprayBowSource, type SprayFrame } from "./spray/spraySystem";
 import { Wake } from "./wake";
 import { CameraRig, MODE_INDEX, type CameraMode } from "./cameras";
+import { formatLoss, formatPreviousLoss, GpuWatch, loadLoss, saveLoss } from "./gpuWatch";
 import { Gui } from "./gui";
 import { Hud, type HudStats } from "./hud";
 import { LoadingOverlay, nextFrame } from "./loading";
@@ -47,6 +48,8 @@ interface AppApi {
   setGpuTimer: (on: boolean) => Promise<void>;
   /** True between `webglcontextlost` and the rebuild that follows `webglcontextrestored`. */
   contextLost: () => boolean;
+  /** The lost-context breadcrumbs: the stage in progress, frames since the mode switch, the GPU string. */
+  gpuWatch: () => { stage: string; frame: number; mode: string; lostAt: string | null; gpu: string };
   camera: () => { position: [number, number, number]; mode: CameraMode };
   /** Teleport the camera (switches to fly mode so nothing pulls it back). */
   setCameraPosition: (p: [number, number, number]) => Promise<void>;
@@ -113,13 +116,29 @@ async function boot(loading: LoadingOverlay): Promise<void> {
 
   // 1. Water: renderer + simulation.
   await loading.next();
+  const query = new URLSearchParams(location.search);
   let renderer: THREE.WebGLRenderer;
+  // The browser's own reason for a refused context (a site blocked after a
+  // GPU crash, a blocklisted driver) arrives as an event, not in the throw.
+  const canvas = document.createElement("canvas");
+  let creationError = "";
+  canvas.addEventListener("webglcontextcreationerror", (e) => {
+    creationError = (e as WebGLContextEvent).statusMessage;
+  });
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
   } catch (err) {
-    throw new UnsupportedError(`This demo needs WebGL2, which this browser could not create (${String(err)}).`);
+    const previous = loadLoss();
+    throw new UnsupportedError(
+      [`This demo needs WebGL2, which this browser could not create.`, creationError || String(err), previous ? formatPreviousLoss(previous) : ""]
+        .filter(Boolean)
+        .join("\n\n"),
+    );
   }
   requireCapabilities(renderer);
+  // Breadcrumbs for a lost context: `?diag=1` probes every frame, not only
+  // the first ones after a mode switch.
+  const watch = new GpuWatch(renderer, query.get("diag") === "1" ? Infinity : undefined);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
@@ -136,7 +155,7 @@ async function boot(loading: LoadingOverlay): Promise<void> {
   const gpuTimer = new GpuTimer(renderer);
   // Off by default: the queries cost 2–7 % of frame rate (docs/perf.md).
   // `?gpuTimer=1` or `__app.setGpuTimer(true)` turns them on.
-  gpuTimer.enabled = new URLSearchParams(location.search).get("gpuTimer") === "1";
+  gpuTimer.enabled = query.get("gpuTimer") === "1";
   const ocean = new Ocean(renderer, params, { timer: gpuTimer });
   scene.add(ocean);
   if (!hasHeightReadback(ocean.sim)) throw new Error("simulation has no height readback (buoyancy)");
@@ -162,6 +181,7 @@ async function boot(loading: LoadingOverlay): Promise<void> {
   const rain = new RainSystem(renderer);
   scene.add(rain.mesh);
   rig.onModeChange((m) => {
+    watch.modeChanged(m);
     if (m !== "boat") {
       wake.reset();
       ocean.material.setWake(null);
@@ -252,17 +272,20 @@ async function boot(loading: LoadingOverlay): Promise<void> {
   const rebuild = async (tier: QualityTier, force = false): Promise<void> => {
     if (rebuilding) return;
     rebuilding = true;
+    if (force) {
+      // Before any tick runs on the new context: the readback buffers,
+      // fences and timer queries of the old one are dead objects now.
+      ocean.contextRestored();
+      wake.reset();
+      ocean.material.setWake(null);
+      gpuTimer.reset();
+      watch.fill();
+    }
     gui.setRebuilding(true);
     await nextFrame();
     await nextFrame();
     const next = cloneParams(params);
     next.quality = tier;
-    if (force) {
-      ocean.contextRestored();
-      wake.reset();
-      ocean.material.setWake(null);
-      gpuTimer.reset();
-    }
     applyParams(next);
     spray.reset();
     rain.reset();
@@ -282,11 +305,18 @@ async function boot(loading: LoadingOverlay): Promise<void> {
     e.preventDefault();
     contextLost = true;
     hud.setGpuLabel("GPU context lost");
+    // What the frame was doing, on the overlay and kept for the next visit
+    // (a browser that then refuses a context shows it on the gate).
+    const report = watch.report(params.quality);
+    saveLoss(report);
+    console.warn(`WebGL context lost while: ${report.stage} (frame ${report.frame} of ${report.mode} mode) on ${report.gpu}`);
+    loading.lost(formatLoss(report));
   });
   renderer.domElement.addEventListener("webglcontextrestored", () => {
     void rebuild(params.quality, true).then(() => {
       contextLost = false;
       hud.setGpuLabel("GPU WebGL2");
+      loading.recovered();
     });
   });
 
@@ -389,12 +419,15 @@ async function boot(loading: LoadingOverlay): Promise<void> {
     // Read back last frame's displacement around the hull before it settles
     // (a block wide enough for every hull sample point in boat mode).
     if (boat || probes.visible) {
+      watch.mark("hull height readback");
       buoyancy.update(probeCentre.x, probeCentre.z, boat ? rig.hull.physics.footprintRadius : 0);
     }
     rig.update(dt);
+    watch.mark("ocean simulation");
     ocean.update(rig.camera, simTime, dt);
     if (rig.mode === "boat") {
       const h = rig.hull;
+      watch.mark("wake simulation");
       gpuTimer.begin("wake");
       wake.update(
         dt,
@@ -421,6 +454,7 @@ async function boot(loading: LoadingOverlay): Promise<void> {
     const cam = rig.camera.position;
     let depthBelow = 0;
     if (cam.y < 12) {
+      watch.mark("camera height readback");
       cameraBuoyancy.update(cam.x, cam.z);
       // Prefer the hull's (wider) block when the camera is inside it: it is
       // the surface the hull is answering to this frame.
@@ -432,6 +466,7 @@ async function boot(loading: LoadingOverlay): Promise<void> {
       isUnderwater = false;
     }
     ocean.material.setUnderwater(isUnderwater);
+    watch.mark("spray");
     gpuTimer.begin("spray");
     sprayFrame.dt = dt;
     sprayFrame.params = params;
@@ -450,6 +485,7 @@ async function boot(loading: LoadingOverlay): Promise<void> {
     gpuTimer.end();
     // Rain (spec §1.16): the curtain follows the camera, the ripple field
     // follows it in texel-snapped steps and feeds the water shader.
+    watch.mark("rain");
     gpuTimer.begin("rain");
     rainFrame.dt = dt;
     rainFrame.t = simTime;
@@ -460,6 +496,7 @@ async function boot(loading: LoadingOverlay): Promise<void> {
     const [rx, rz] = rain.fieldOrigin;
     ocean.material.setRain(rain.intensity > 0 ? rain.ripple.texture : null, rx, rz, rain.fieldSize, rain.intensity);
     gpuTimer.end();
+    watch.mark("underwater, island, lights");
     ocean.sky.skybox.visible = !isUnderwater;
     underwater.visible = isUnderwater;
     if (isUnderwater) underwater.update(rig.camera, params, ocean.sky, simTime);
@@ -487,14 +524,18 @@ async function boot(loading: LoadingOverlay): Promise<void> {
     renderer.toneMappingExposure = 1 + 0.25 * night;
 
     // Scene depth (terrain, ship) for the water's shoreline / shallows.
+    watch.mark("scene depth pre-pass");
     ocean.renderSceneDepth(scene, rig.camera);
     if (sunShafts.active) {
+      watch.mark("sun shafts + scene render");
       sunShafts.render(scene, rig.camera, gpuTimer);
     } else {
+      watch.mark(boat ? "shadow map + scene render" : "scene render");
       gpuTimer.begin("water");
       renderer.render(scene, rig.camera);
       gpuTimer.end();
     }
+    watch.endFrame(dpr);
 
     if (pendingSnapshot) {
       snapshots.set(pendingSnapshot, readPixels(renderer));
@@ -614,6 +655,7 @@ async function boot(loading: LoadingOverlay): Promise<void> {
       return frame();
     },
     contextLost: () => contextLost,
+    gpuWatch: () => ({ stage: watch.stage, frame: watch.frame, mode: watch.mode, lostAt: watch.lostAt, gpu: watch.gpu }),
     camera: () => ({ position: rig.camera.position.toArray() as [number, number, number], mode: rig.mode }),
     setCameraPosition: (p) => {
       rig.setMode("fly");

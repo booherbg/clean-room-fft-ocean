@@ -76,7 +76,10 @@ Frame · Draws · Tris · DPR, with a second line of per-section GPU times
 when enabled.
 
 URL flags: `?gpuTimer=1` (GPU section timer on at boot), `?ship=procedural`
-(skip the glTF galleon), `?palms=procedural` (skip the glTF palms).
+(skip the glTF galleon), `?palms=procedural` (skip the glTF palms),
+`?diag=1` (probe the GPU after every stage so a lost context reports the
+stage that caused it; the report also lands in `localStorage` and is quoted
+by the no-WebGL2 screen on the next visit).
 
 ## Testing
 
@@ -94,7 +97,7 @@ npm run typecheck
   clipmap seams, the iWave kernel, the rigid body and hull physics, the
   buoyancy sampler, the island heightfield and vegetation placement, the
   spray rules, the sky constant table and the asset byte budget.
-- **e2e (`e2e/`, 6 specs, 51 tests)** run the real shaders on the real GPU:
+- **e2e (`e2e/`, 6 specs, 52 tests)** run the real shaders on the real GPU:
   the GPU displacement texture is read back and compared to the CPU oracle
   for the same seed, the FFT pass alone is compared to the CPU FFT, the foam
   field is checked to decay, the render layer is pixel-checked against a
@@ -131,7 +134,7 @@ Four layers; each imports only the ones beneath it. `core` has no three.js
 and no DOM. The full file map with one-line responsibilities is spec §3.
 
 ```
-app     main.ts (composition root, RAF loop, window.__app) · gui.ts · hud.ts · loading.ts
+app     main.ts (composition root, RAF loop, window.__app) · gui.ts · hud.ts · loading.ts · gpuWatch.ts
         cameras.ts (Orbit/Fly/Boat) · buoyancy.ts (async height readback) · wake.ts · presets.ts
         ship/{ship,hullPhysics,hullShape,shipModel,probesOverlay} · spray/{sprayField,spraySystem} · rain/rainSystem
         assets/{shipLoader,shipMaterials,proceduralTextures}

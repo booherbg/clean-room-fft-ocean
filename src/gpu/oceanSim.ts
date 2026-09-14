@@ -88,9 +88,16 @@ export class OceanSim {
     return this.reader.consume(slot);
   }
 
-  /** After a WebGL context restore: fresh cascades (targets, foam) and readback buffers. */
+  /**
+   * After a WebGL context restore: fresh cascades (targets, foam) and
+   * readback buffers. The old cascades are dropped, not disposed: their GL
+   * objects died with the context, and disposing them would only have three
+   * delete objects that no longer exist (one console error per object).
+   */
   contextRestored(): void {
     this.reader.reset();
+    this.cascades = [];
+    this.ffts.clear();
     this.build();
   }
 
